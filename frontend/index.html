@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pronóstico SARIMA</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root {
+    color-scheme: light;
+    --surface-0: #f4f3ef;
+    --surface-1: #fcfcfb;
+    --border: #e2e0da;
+    --grid: #ecebe6;
+    --text-primary: #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted: #7a7974;
+    --series-1: #2a78d6;   /* histórico */
+    --series-2: #eb6834;   /* pronóstico */
+    --band-2: rgba(235, 104, 52, 0.16);
+    --accent: #2a78d6;
+    --error-bg: #fdecea;
+    --error-text: #8a1f17;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --surface-0: #121211;
+      --surface-1: #1a1a19;
+      --border: #2e2d2b;
+      --grid: #262624;
+      --text-primary: #f0efec;
+      --text-secondary: #c3c2b7;
+      --text-muted: #8f8e86;
+      --series-1: #3987e5;
+      --series-2: #d95926;
+      --band-2: rgba(217, 89, 38, 0.22);
+      --accent: #3987e5;
+      --error-bg: #3a1714;
+      --error-text: #f4b4ad;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--surface-0); color: var(--text-primary);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 1.5rem; margin: 0 0 4px; }
+  .sub { color: var(--text-secondary); margin: 0 0 20px; }
+  .card {
+    background: var(--surface-1); border: 1px solid var(--border);
+    border-radius: 12px; padding: 16px 18px; margin-bottom: 16px;
+  }
+  .controles { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: end; }
+  label { display: flex; flex-direction: column; font-size: .85rem; color: var(--text-secondary); gap: 4px; }
+  input, select {
+    font: inherit; color: var(--text-primary); background: var(--surface-0);
+    border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; width: 120px;
+  }
+  button {
+    font: inherit; font-weight: 600; color: #fff; background: var(--accent);
+    border: 0; border-radius: 8px; padding: 8px 18px; cursor: pointer;
+  }
+  button:disabled { opacity: .6; cursor: wait; }
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+  .kpi .etq { font-size: .8rem; color: var(--text-muted); }
+  .kpi .val { font-size: 1.35rem; font-weight: 650; }
+  .grafica { position: relative; height: 380px; }
+  .error { background: var(--error-bg); color: var(--error-text); border-radius: 8px; padding: 10px 14px; display: none; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: right; padding: 6px 10px; border-bottom: 1px solid var(--grid); }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--text-secondary); font-weight: 600; font-size: .85rem; }
+  details summary { cursor: pointer; color: var(--text-secondary); }
+  .meta { font-size: .85rem; color: var(--text-secondary); }
+  .meta code { background: var(--surface-0); padding: 1px 6px; border-radius: 4px; }
+  .estado { font-size: .85rem; color: var(--text-muted); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Pronóstico horario con SARIMA</h1>
+  <p class="sub">Datos de InfluxDB · modelo entrenado en Google Colab · servido con FastAPI</p>
+
+  <div class="card controles">
+    <label>Horas a predecir
+      <input id="horas" type="number" min="1" max="72" value="12">
+    </label>
+    <label>Horas de historia
+      <input id="historia" type="number" min="6" max="720" value="48">
+    </label>
+    <label>Confianza
+      <select id="confianza">
+        <option value="0.8">80 %</option>
+        <option value="0.9">90 %</option>
+        <option value="0.95" selected>95 %</option>
+      </select>
+    </label>
+    <button id="btn">Predecir</button>
+    <span class="estado" id="estado"></span>
+  </div>
+
+  <div class="error" id="error"></div>
+
+  <div class="kpis" id="kpis" style="margin-bottom:16px"></div>
+
+  <div class="card">
+    <div class="grafica"><canvas id="grafica" aria-label="Histórico y pronóstico" role="img"></canvas></div>
+  </div>
+
+  <div class="card">
+    <details open>
+      <summary>Tabla del pronóstico</summary>
+      <table id="tabla" style="margin-top:10px">
+        <thead><tr><th>Hora (local)</th><th>Predicción</th><th>Límite inferior</th><th>Límite superior</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </details>
+  </div>
+
+  <div class="card meta" id="meta">Cargando información del modelo…</div>
+</main>
+
+<script>
+// Si el frontend se sirve desde la misma API, la base es "".
+// Para abrirlo desde otro sitio: index.html?api=https://su-api.example.com
+const API = new URLSearchParams(location.search).get("api") || "";
+const ZONA = Intl.DateTimeFormat().resolvedOptions().timeZone;
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const fmtHora = iso => new Date(iso).toLocaleString("es-CO", {
+  day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit", hour12: false, timeZone: ZONA });
+const num = v => v.toLocaleString("es-CO", { maximumFractionDigits: 2 });
+
+let grafica = null;
+
+async function pedir(ruta) {
+  const r = await fetch(API + ruta);
+  const cuerpo = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(cuerpo.detail || `Error ${r.status}`);
+  return cuerpo;
+}
+
+function mostrarError(msg) {
+  const e = document.getElementById("error");
+  e.textContent = msg || "";
+  e.style.display = msg ? "block" : "none";
+}
+
+function kpis(d) {
+  const ult = d.historico.at(-1), p = d.prediccion;
+  const max = p.reduce((a, b) => (b.prediccion > a.prediccion ? b : a));
+  const items = [
+    ["Último valor real", ult ? num(ult.valor) : "—", ult ? fmtHora(ult.tiempo) : ""],
+    ["Próxima hora", num(p[0].prediccion), fmtHora(p[0].tiempo)],
+    [`Máximo en ${p.length} h`, num(max.prediccion), fmtHora(max.tiempo)],
+    ["Último dato en Influx", fmtHora(d.ultima_observacion), `${d.horas_contexto_usadas} h de contexto`],
+  ];
+  document.getElementById("kpis").innerHTML = items.map(([e, v, s]) =>
+    `<div class="card kpi" style="margin:0"><div class="etq">${e}</div><div class="val">${v}</div><div class="etq">${s}</div></div>`).join("");
+}
+
+function tabla(pred) {
+  document.querySelector("#tabla tbody").innerHTML = pred.map(p =>
+    `<tr><td>${fmtHora(p.tiempo)}</td><td>${num(p.prediccion)}</td><td>${num(p.limite_inferior)}</td><td>${num(p.limite_superior)}</td></tr>`).join("");
+}
+
+function dibujar(d) {
+  const h = d.historico, p = d.prediccion, nh = h.length;
+  const etiquetas = [...h, ...p].map(x => fmtHora(x.tiempo));
+  const vacio = n => Array(n).fill(null);
+  // El pronóstico arranca en el último punto real para que la línea sea continua
+  const ancla = nh ? [h[nh - 1].valor] : [];
+  const desde = Math.max(nh - 1, 0);
+  const serieP = [...vacio(desde), ...ancla, ...p.map(x => x.prediccion)];
+  const inf = [...vacio(desde), ...ancla, ...p.map(x => x.limite_inferior)];
+  const sup = [...vacio(desde), ...ancla, ...p.map(x => x.limite_superior)];
+
+  const c1 = css("--series-1"), c2 = css("--series-2"), banda = css("--band-2");
+  const tinta = css("--text-secondary"), rejilla = css("--grid");
+  const pct = Math.round(d.confianza * 100);
+
+  if (grafica) grafica.destroy();
+  grafica = new Chart(document.getElementById("grafica"), {
+    type: "line",
+    data: {
+      labels: etiquetas,
+      datasets: [
+        { label: `Límite inferior (${pct} %)`, data: inf, borderWidth: 0, pointRadius: 0, fill: false },
+        { label: `Intervalo ${pct} %`, data: sup, borderWidth: 0, pointRadius: 0,
+          pointStyle: "rect", backgroundColor: banda, borderColor: banda, fill: "-1" },
+        { label: "Histórico (InfluxDB)", data: [...h.map(x => x.valor), ...vacio(p.length)],
+          borderColor: c1, backgroundColor: c1, borderWidth: 2, pointRadius: 0, pointHoverRadius: 5, tension: .2 },
+        { label: "Pronóstico SARIMA", data: serieP, borderColor: c2, backgroundColor: c2,
+          borderWidth: 2, borderDash: [6, 4], pointRadius: 0, pointHoverRadius: 5, tension: .2 },
+      ],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      interaction: { mode: "index", intersect: false },
+      plugins: {
+        legend: { labels: { color: tinta, usePointStyle: true, pointStyle: "line",
+                  filter: it => !it.text.startsWith("Límite") } },
+        tooltip: {
+          // Oculta el límite inferior (va dentro de "Intervalo") y el punto de anclaje duplicado
+          filter: it => it.datasetIndex !== 0 && it.raw !== null && !(it.dataIndex === desde && nh && it.datasetIndex !== 2),
+          callbacks: { label: it => {
+            if (it.datasetIndex === 1) return ` Intervalo: ${num(inf[it.dataIndex])} – ${num(it.raw)}`;
+            return ` ${it.dataset.label}: ${num(it.raw)}`;
+          } },
+        },
+      },
+      scales: {
+        x: { ticks: { color: tinta, maxRotation: 0, autoSkip: true, maxTicksLimit: 8 },
+             grid: { display: false } },
+        y: { ticks: { color: tinta }, grid: { color: rejilla } },
+      },
+    },
+  });
+}
+
+async function predecir() {
+  const btn = document.getElementById("btn"), estado = document.getElementById("estado");
+  const horas = document.getElementById("horas").value;
+  const historia = document.getElementById("historia").value;
+  const confianza = document.getElementById("confianza").value;
+  btn.disabled = true; estado.textContent = "Consultando…"; mostrarError("");
+  try {
+    const d = await pedir(`/api/prediccion?horas=${horas}&historia=${historia}&confianza=${confianza}`);
+    kpis(d); tabla(d.prediccion); dibujar(d);
+    estado.textContent = `Actualizado ${new Date().toLocaleTimeString("es-CO")} · horas en ${ZONA}`;
+  } catch (e) {
+    mostrarError(e.message); estado.textContent = "";
+  } finally { btn.disabled = false; }
+}
+
+async function cargarMeta() {
+  const el = document.getElementById("meta");
+  try {
+    const [s, m] = await Promise.all([pedir("/api/salud"), pedir("/api/modelo").catch(e => ({ error: e.message }))]);
+    if (m.error) { el.innerHTML = `<b>Modelo:</b> ${m.error}`; return; }
+    const met = m.metricas_test ? Object.entries(m.metricas_test).map(([k, v]) => `${k}: <code>${num(v)}</code>`).join(" · ") : "—";
+    el.innerHTML = `<b>Modelo:</b> SARIMA<code>(${m.order.join(",")})(${m.seasonal_order.join(",")})</code> ·
+      serie <code>${m.measurement}/${m.field}</code> · entrenado ${m.entrenado_en} con ${m.n_observaciones} h ·
+      métricas de prueba: ${met}${s.modo_demo ? " · <b>MODO DEMO (datos sintéticos)</b>" : ""}`;
+  } catch (e) { el.textContent = "No se pudo leer la información del modelo: " + e.message; }
+}
+
+document.getElementById("btn").addEventListener("click", predecir);
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", predecir);
+cargarMeta();
+predecir();
+</script>
+</body>
+</html>
