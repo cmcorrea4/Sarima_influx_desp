@@ -65,7 +65,7 @@ def preparar_serie_horaria(tiempos, valores, horas: int) -> pd.Series:
     if len(tiempos) == 0:
         return pd.Series(dtype=float, name="valor")
 
-    idx = pd.to_datetime(pd.Series(tiempos), utc=True).dt.tz_localize(None)
+    idx = pd.to_datetime(pd.Series(tiempos), utc=True).dt.tz_localize(None).dt.floor("h")
     s = pd.Series(np.asarray(valores, dtype=float), index=pd.DatetimeIndex(idx), name="valor")
     s = s.groupby(level=0).mean().sort_index()
 
